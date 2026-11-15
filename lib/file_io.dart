@@ -1,0 +1,89 @@
+import 'dart:convert';
+
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart';
+
+const _projectType = XTypeGroup(label: 'Proyek BuildWire', extensions: ['bwproj', 'tdproj']);
+const _maxBytes = 16 * 1024 * 1024;
+
+/// Returns the chosen file's text, or null if the user cancelled.
+/// Throws [FormatException] with a message for the user when the file can't be used.
+Future<String?> pickProjectText() async {
+  final file = await openFile(acceptedTypeGroups: const [_projectType]);
+  if (file == null) return null;
+  if (await file.length() > _maxBytes) {
+    throw const FormatException('File terlalu besar untuk proyek BuildWire (maksimal 16 MB).');
+  }
+  return file.readAsString();
+}
+
+String _safeName(String projectName, String fallback) {
+  final safe = projectName.replaceAll(RegExp(r'[^A-Za-z0-9 _-]'), '').trim();
+  return safe.isEmpty ? fallback : safe;
+}
+
+/// Saves bytes, asking for a location on desktop. Returns false if the user cancelled.
+Future<bool> saveBytes({required String baseName, required String extension, required String label, required String mimeType, required Uint8List bytes}) async {
+  final name = '${_safeName(baseName, 'proyek')}.$extension';
+  final file = XFile.fromData(bytes, name: name, mimeType: mimeType);
+  if (kIsWeb) {
+    await file.saveTo(name);
+    return true;
+  }
+  final location = await getSaveLocation(suggestedName: name, acceptedTypeGroups: [XTypeGroup(label: label, extensions: [extension])]);
+  if (location == null) return false;
+  await file.saveTo(location.path);
+  return true;
+}
+
+Future<bool> saveProjectText(String projectName, String text) =>
+    saveBytes(baseName: projectName, extension: 'bwproj', label: 'Proyek BuildWire', mimeType: 'application/json', bytes: Uint8List.fromList(utf8.encode(text)));
+
+Future<bool> saveCsv(String projectName, String text) => saveBytes(
+      baseName: '$projectName material',
+      extension: 'csv',
+      label: 'CSV',
+      mimeType: 'text/csv',
+      // A byte order mark lets Excel read the file as UTF-8.
+      bytes: Uint8List.fromList([0xEF, 0xBB, 0xBF, ...utf8.encode(text)]),
+    );
+
+Future<bool> savePng(String projectName, Uint8List bytes) =>
+    saveBytes(baseName: projectName, extension: 'png', label: 'Gambar PNG', mimeType: 'image/png', bytes: bytes);
+
+const _ladderTypes = [
+  XTypeGroup(label: 'Program ladder (BuildLadder, Zelio)', extensions: ['bwlad', 'zm2']),
+];
+
+/// A ladder file the user picked: its name and bytes, or null if cancelled. Opens BuildLadder (.bwlad) and Zelio Soft 2
+/// (.zm2) files.
+Future<(String, Uint8List)?> pickLadderFile() async {
+  final file = await openFile(acceptedTypeGroups: _ladderTypes);
+  if (file == null) return null;
+  if (await file.length() > _maxBytes) throw const FormatException('File terlalu besar (maksimal 16 MB).');
+  return (file.name, await file.readAsBytes());
+}
+
+Future<bool> saveLadderText(String name, String text) =>
+    saveBytes(baseName: name, extension: 'bwlad', label: 'Program ladder BuildLadder', mimeType: 'application/json', bytes: Uint8List.fromList(utf8.encode(text)));
+
+/// Saves a ladder program, offering Zelio Soft 2 (.zm2) first when [zm2] is given and BuildLadder (.bwlad) always.
+/// Returns the extension written, or null if the user cancelled.
+Future<String?> saveLadderFile(String baseName, {Uint8List? zm2, required String bwlad}) async {
+  final groups = [
+    if (zm2 != null) const XTypeGroup(label: 'Zelio Soft 2 (.zm2)', extensions: ['zm2']),
+    const XTypeGroup(label: 'BuildLadder (.bwlad)', extensions: ['bwlad']),
+  ];
+  final first = zm2 != null ? 'zm2' : 'bwlad';
+  final location = await getSaveLocation(suggestedName: '${_safeName(baseName, 'program')}.$first', acceptedTypeGroups: groups);
+  if (location == null) return null;
+  var path = location.path;
+  final lower = path.toLowerCase();
+  if (!lower.endsWith('.zm2') && !lower.endsWith('.bwlad')) {
+    path = '$path.${location.activeFilter?.extensions?.first ?? first}';
+  }
+  final asZm2 = zm2 != null && path.toLowerCase().endsWith('.zm2');
+  final bytes = asZm2 ? zm2 : Uint8List.fromList(utf8.encode(bwlad));
+  await XFile.fromData(bytes, name: path.split(RegExp(r'[\/]')).last).saveTo(path);
+  return asZm2 ? 'zm2' : 'bwlad';
+}
