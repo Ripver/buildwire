@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -232,6 +234,219 @@ void main() {
     final wire = app.project.wires.single;
     expect(wire.isJumper, isTrue);
     expect(app.routeWorld(wire).length, 2);
+
+    // The jumper lies on top of the contactor: clicking it picks the jumper, not the contactor, so Del removes it.
+    await tester.tap(find.byKey(const ValueKey('mode-jumper')));
+    await tester.pump();
+    app.clearSelection();
+    final points = app.wirePoints(wire);
+    // Route points are canvas coordinates; the tap needs screen ones.
+    final origin = tester.getTopLeft(find.byType(CanvasView));
+    await tester.tapAt(origin + (points.first + points.last) / 2);
+    await tester.pump();
+    expect(app.selectedWire, wire.id);
+    expect(app.selectedDevices, isEmpty);
+    app.deleteSelection();
+    expect(app.project.wires, isEmpty);
+  });
+
+  testWidgets('a wire is drawn like in Proteus: left-click places bends, right-click drops it', (tester) async {
+    final app = await pumpApp(tester);
+    app.addDevice('generic_source_ac', world: const Offset(200, 200));
+    app.addDevice('foco_led', world: const Offset(700, 200));
+    await tester.pump();
+    final area = tester.getRect(find.byType(CanvasView));
+    Offset free(double fx, double fy) => Offset(area.left + area.width * fx, area.top + area.height * fy);
+
+    // Right-click cancels.
+    await tester.tap(find.byKey(const ValueKey('terminal-G1-L')));
+    await tester.pump();
+    expect(app.pending, isNotNull);
+    await tester.tapAt(free(0.5, 0.92), buttons: kSecondaryButton);
+    await tester.pump();
+    expect(app.pending, isNull);
+    expect(app.project.wires, isEmpty);
+
+    // Left-click on empty canvas adds bends; the finished wire runs through them.
+    await tester.tap(find.byKey(const ValueKey('terminal-G1-L')));
+    await tester.pump();
+    await tester.tapAt(free(0.3, 0.9));
+    await tester.pump();
+    await tester.tapAt(free(0.7, 0.9));
+    await tester.pump();
+    expect(app.pendingCorners, hasLength(2));
+    expect(app.pending, isNotNull, reason: 'clicking empty canvas no longer cancels');
+    await tester.tap(find.byKey(const ValueKey('terminal-HL1-F')));
+    await tester.pump();
+    final wire = app.project.wires.single;
+    expect(wire.points, hasLength(2));
+    final route = app.routeWorld(wire);
+    for (final corner in wire.points!) {
+      expect(route.any((p) => (p - Offset(corner.x, corner.y)).distance < 0.01), isTrue, reason: 'the route goes through each bend');
+    }
+    for (var i = 0; i + 1 < route.length; i++) {
+      expect((route[i].dx - route[i + 1].dx).abs() < 0.01 || (route[i].dy - route[i + 1].dy).abs() < 0.01, isTrue);
+    }
+    expect(app.pendingCorners, isEmpty);
+  });
+
+  test('an overload relay plugs onto a contactor, travels with it, and comes off again', () {
+    final app = buildApp();
+    app.addDevice('chint_nxc32', world: const Offset(400, 300));
+    final contactor = app.project.devices.single;
+    final socket = app.terminalWorld(TerminalRef(contactor.id, '4'));
+    // Dropped a little off its seat, it snaps in under the contactor, centred on its 4/T2.
+    app.addDevice('chint_nr2_25', world: socket + const Offset(30, 140));
+    final tor = app.project.devices.last;
+    expect((app.terminalWorld(TerminalRef(tor.id, '3')).dx - socket.dx).abs(), lessThan(1));
+    expect(tor.y, lessThan(contactor.y + app.defOf(contactor).height), reason: 'its top tucks behind the contactor');
+    expect(app.project.wires, isEmpty, reason: 'plugged in, not wired: no jumpers are drawn');
+    expect(tor.data['seated_on'], contactor.id);
+    expect(app.terminalCovered(TerminalRef(contactor.id, '2')), isFalse, reason: 'the contactor terminals still take wires');
+    expect(app.terminalCovered(TerminalRef(tor.id, '1')), isTrue);
+    expect(app.terminalCovered(TerminalRef(tor.id, '95')), isFalse);
+
+    app.beginMove(contactor.id);
+    app.moveSelectionBy(const Offset(200, 0));
+    app.endMove();
+    expect((app.terminalWorld(TerminalRef(tor.id, '3')).dx - app.terminalWorld(TerminalRef(contactor.id, '4')).dx).abs(), lessThan(1), reason: 'it rides along');
+
+    app.beginMove(tor.id);
+    app.moveSelectionBy(const Offset(0, 400));
+    app.endMove();
+    expect(tor.data.containsKey('seated_on'), isFalse, reason: 'pulled off, the pins no longer connect');
+    expect(app.terminalCovered(TerminalRef(contactor.id, '2')), isFalse);
+    app.dispose();
+  });
+
+  test('a DOL starter still runs with its overload relay plugged straight onto the contactor', () {
+    final app = buildApp()..applyTemplate(kTemplates.firstWhere((t) => t.id == 'dol'));
+    final km = byTag(app, 'KM1'), tor = byTag(app, 'F1');
+    // Drag the relay up under the contactor: it plugs in, and the three short wires between them go.
+    final seat = (app.defOf(tor).torPanel!['seat'] as num).toDouble() * app.defOf(tor).height;
+    final under = Offset(app.terminalWorld(TerminalRef(km.id, '4')).dx - app.terminalWorld(TerminalRef(tor.id, '3')).dx, km.y + app.defOf(km).height - seat - tor.y);
+    app.beginMove(tor.id);
+    app.moveSelectionBy(under + const Offset(15, 20));
+    app.endMove();
+    expect(tor.data['seated_on'], km.id);
+    for (final (c, t) in const [('2', '1'), ('4', '3'), ('6', '5')]) {
+      expect(app.project.wires.any((w) => w.connects(TerminalRef(km.id, c), TerminalRef(tor.id, t))), isFalse);
+    }
+    app.startSimulation();
+    app.clickDevice(byTag(app, 'QF1'));
+    app.clickDevice(byTag(app, 'F2'));
+    app.pressDevice(byTag(app, 'S1'), true);
+    app.pressDevice(byTag(app, 'S1'), false);
+    expect(app.stateOf(byTag(app, 'M1')), 'run_fwd', reason: 'power reaches the motor through the plugged-in pins');
+    app.stopSimulation();
+    app.dispose();
+  });
+
+  testWidgets('dragging the corner grip of a selected part resizes it, in one undo step', (tester) async {
+    final app = await pumpApp(tester);
+    app.addDevice('chint_nxc32', world: const Offset(400, 300));
+    await tester.pump();
+    final km = app.project.devices.single;
+    final width = app.defOf(km).width;
+    final topLeft = Offset(km.x, km.y);
+    final grip = find.byKey(const ValueKey('resize-handle'));
+    expect(grip, findsOneWidget);
+    // Moved in small steps, as a mouse does.
+    final gesture = await tester.startGesture(tester.getCenter(grip));
+    for (var i = 0; i < 12; i++) {
+      await gesture.moveBy(const Offset(10, 10));
+      await tester.pump();
+    }
+    await gesture.up();
+    await tester.pump();
+    expect(app.scaleOf(km), greaterThan(1.2));
+    expect(Offset(km.x, km.y), topLeft, reason: 'the opposite corner stays put');
+    app.undo();
+    expect(app.defOf(app.project.devices.single).width, width);
+  });
+
+  test('the overload relay front works: STOP opens the control circuit while held, TEST trips, RESET clears it', () {
+    final app = buildApp()..applyTemplate(kTemplates.firstWhere((t) => t.id == 'dol'));
+    final tor = byTag(app, 'F1');
+    app.startSimulation();
+    app.clickDevice(byTag(app, 'QF1'));
+    app.clickDevice(byTag(app, 'F2'));
+    app.pressDevice(byTag(app, 'S1'), true);
+    app.pressDevice(byTag(app, 'S1'), false);
+    expect(app.stateOf(byTag(app, 'KM1')), 'closed');
+
+    app.torKey(tor, 'stop', true);
+    expect(app.stateOf(tor), 'stop');
+    expect(app.stateOf(byTag(app, 'KM1')), 'open', reason: '95-96 opens, so the contactor drops out');
+    app.torKey(tor, 'stop', false);
+    expect(app.stateOf(tor), 'normal');
+    expect(app.stateOf(byTag(app, 'KM1')), 'open', reason: 'the self-hold is gone, as in a real starter');
+
+    app.torKey(tor, 'test', true);
+    expect(app.stateOf(tor), 'tripped');
+    app.torKey(tor, 'reset', true);
+    expect(app.stateOf(tor), 'normal');
+
+    app.setTorCurrent(tor, 100);
+    expect(app.number(tor, 'rated_current_a'), 25, reason: 'the dial stops at its printed maximum');
+    app.setTorCurrent(tor, 19.3);
+    expect(app.number(tor, 'rated_current_a'), 19.5, reason: 'half-amp steps');
+    app.stopSimulation();
+    app.dispose();
+  });
+
+  test('an analog timer knob turns within its range', () {
+    final app = buildApp();
+    app.addDevice('selec_800s', world: const Offset(300, 300));
+    final timer = app.project.devices.single;
+    app.turnTimerKnob(timer, 12.34);
+    expect(app.timeOf(timer), 12);
+    app.turnTimerKnob(timer, 999, done: true);
+    expect(app.timeOf(timer), 60);
+    app.turnTimerKnob(timer, 0);
+    expect(app.timeOf(timer), 0.5);
+    app.dispose();
+  });
+
+  test('a part can be resized; its terminals and wires follow, and undo puts it back', () {
+    final app = buildApp()..applyTemplate(kTemplates.firstWhere((t) => t.id == 'lamp'));
+    final km = byTag(app, 'KM1');
+    final width = app.defOf(km).width;
+    final centre = Rect.fromLTWH(km.x, km.y, width, app.defOf(km).height).center;
+    final wire = app.project.wires.firstWhere((w) => w.touches(km.id));
+    final end = wire.a.deviceId == km.id ? wire.a : wire.b;
+    app.beginControlEdit();
+    app.setDeviceScale(km, 1.5);
+    app.endControlEdit();
+    expect(app.defOf(km).width, closeTo(width * 1.5, 0.01));
+    expect(Rect.fromLTWH(km.x, km.y, app.defOf(km).width, app.defOf(km).height).center, offsetMoreOrLessEquals(centre, epsilon: 0.01), reason: 'resized around its centre');
+    final route = app.routeWorld(wire);
+    expect(route.contains(app.terminalWorld(end)), isTrue, reason: 'the wire still ends on the moved terminal');
+    expect(app.defs[km.defId]!.width, width, reason: 'the catalogue entry is unchanged');
+    app.undo();
+    expect(app.defOf(byTag(app, 'KM1')).width, width);
+    app.dispose();
+  });
+
+  test('automatic layout puts the power circuit top to bottom on the left and the controls on the right', () {
+    final app = buildApp()..applyTemplate(kTemplates.firstWhere((t) => t.id == 'dol'));
+    final before = {for (final d in app.project.devices) d.id: Offset(d.x, d.y)};
+    app.autoArrange();
+    double top(String tag) => byTag(app, tag).y;
+    expect(top('G1'), lessThan(top('QF1')));
+    expect(top('QF1'), lessThan(top('KM1')));
+    expect(top('KM1'), lessThan(top('F1')));
+    expect(top('F1'), lessThan(top('M1')));
+    final powerRight = ['G1', 'QF1', 'KM1', 'F1', 'M1'].map((t) => byTag(app, t).x + app.defOf(byTag(app, t)).width).reduce(math.max);
+    for (final tag in ['S0', 'S1', 'HL1']) {
+      expect(byTag(app, tag).x, greaterThan(powerRight), reason: '$tag sits on the control side');
+    }
+    expect(app.project.wires.every((w) => w.points == null), isTrue, reason: 'the router lays every wire again');
+    app.undo();
+    for (final d in app.project.devices) {
+      expect(Offset(d.x, d.y), before[d.id], reason: 'one undo step puts everything back');
+    }
+    app.dispose();
   });
 
   testWidgets('dragging a wire segment sets a manual route, and it can be reset', (tester) async {

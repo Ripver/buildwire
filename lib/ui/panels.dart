@@ -689,7 +689,8 @@ class _Guide extends StatelessWidget {
             ),
           ],
         ),
-        step('Menyambung', 'Klik satu terminal, lalu terminal tujuan.'),
+        step('Menyambung', 'Klik satu terminal, lalu terminal tujuan. Klik kiri di tempat kosong untuk membelokkan kabel, klik kanan untuk batal.'),
+        step('Menata', 'Alat, Tata letak otomatis: rangkaian daya di kiri, kontrol di kanan.'),
         step('Jumper', 'Pilih mode Jumper di toolbar, atau tekan J.'),
         step('Mengatur kabel', 'Klik kabel, lalu seret kotak kecil di segmennya.'),
         step('Memilih banyak', 'Seret di area kosong, atau tahan Shift sambil klik.'),
@@ -799,6 +800,37 @@ class _DevicePropertiesState extends State<_DeviceProperties> {
         const SizedBox(height: 16),
         const SectionLabel('Tag'),
         TextField(key: const ValueKey('tag-field'), controller: _tag, focusNode: _focus, style: uiText(13, tokens.text), onSubmitted: (value) => app.setTag(widget.device, value)),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Expanded(child: SectionLabel('Ukuran ${(app.scaleOf(widget.device) * 100).round()}%')),
+            if ((app.scaleOf(widget.device) - 1).abs() > 0.001)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: TextButton(
+                  key: const ValueKey('scale-reset'),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6), minimumSize: const Size(0, 24)),
+                  onPressed: () {
+                    app.beginControlEdit();
+                    app.setDeviceScale(widget.device, 1);
+                    app.endControlEdit();
+                  },
+                  child: Text('100%', style: uiText(12, tokens.accent, weight: 600)),
+                ),
+              ),
+          ],
+        ),
+        // Bigger for parts that need to be read, smaller to fit a crowded panel; terminals and wires follow.
+        Slider(
+          key: const ValueKey('scale-slider'),
+          min: AppState.minScale,
+          max: AppState.maxScale,
+          divisions: ((AppState.maxScale - AppState.minScale) * 20).round(),
+          value: app.scaleOf(widget.device).clamp(AppState.minScale, AppState.maxScale),
+          onChangeStart: (_) => app.beginControlEdit(),
+          onChanged: (v) => app.setDeviceScale(widget.device, v),
+          onChangeEnd: (_) => app.endControlEdit(),
+        ),
         if (def.isTimer) ...[
           const SizedBox(height: 16),
           const SectionLabel('Waktu tunda (detik)'),

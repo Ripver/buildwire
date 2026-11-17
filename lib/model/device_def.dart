@@ -139,6 +139,39 @@ class DeviceDef {
   /// A digital timer's display, LEDs and keys on its photo.
   Map<String, dynamic>? get timerPanel => behavior['timer_panel'] as Map<String, dynamic>?;
 
+  /// The working front of a thermal overload relay: TEST, STOP and RESET areas and the current dial.
+  Map<String, dynamic>? get torPanel => behavior['tor_panel'] as Map<String, dynamic>?;
+
+  /// An analog timer's turnable knob: centre, radius and the time range it covers.
+  Map<String, dynamic>? get knob => behavior['knob'] as Map<String, dynamic>?;
+
+  bool get isOverloadRelay => group == 'Overload relay (TOR)';
+  bool get isContactor => group == 'Kontaktor';
+
+  /// The same part drawn [factor] times its catalogue size. Terminals are placed as fractions, so they follow.
+  DeviceDef scaled(double factor) => DeviceDef(
+        id: id,
+        name: name,
+        designator: designator,
+        category: category,
+        categoryLabel: categoryLabel,
+        group: group,
+        widthMm: widthMm * factor,
+        heightMm: heightMm * factor,
+        ratings: ratings,
+        terminals: terminals,
+        states: states,
+        defaultState: defaultState,
+        behavior: behavior,
+        sounds: sounds,
+        loopSounds: loopSounds,
+        isSymbol: isSymbol,
+        isRaster: isRaster,
+        isBackLayer: isBackLayer,
+        license: license,
+        source: source,
+      );
+
   bool get isDinRail => group == 'Rel DIN';
 
   /// Paint order: panel boxes first, then rails, then everything else.

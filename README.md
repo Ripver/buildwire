@@ -16,12 +16,17 @@ It was made for vocational students and the teachers who train them, so the inte
 
 **Wiring canvas**
 - A library of 339 parts (MCB, MCCB, MPCB, RCCB, contactors, auxiliary blocks, timers, relays, push buttons, selectors, pilot lights, meters, motors, power supplies, DIN rails, enclosures) and 251 schematic symbols.
-- Wires run from terminal to terminal and route around parts. You can drag wire segments, use jumpers, and set wire colour and size. Parts dropped near a DIN rail clip onto it.
+- Click a terminal and the wire follows the pointer. Left-click on empty canvas to fix a bend, right-click to drop the wire, click the second terminal to finish. Wires without bends are laid by the router: the shortest way around the parts, avoiding crossings and wires on top of each other.
+- Every wire carries a printed number marker at both ends. Wires on one potential share a number; wires from the supply take the phase name (L1, L2, L3, N, PE).
+- Automatic layout (Alat, Tata letak otomatis) puts the power circuit top to bottom on the left and the controls on the right, ordered so wires drop straight down.
+- Parts dropped near a DIN rail clip onto it. A thermal overload relay pushed under a contactor plugs into it, as on a real starter, with no wires between them.
+- Parts can be resized from their corner grip or the size slider; terminals and wires follow.
 - Ready-made circuits to start from: a lamp through a contactor, a DOL starter, forward and reverse, automatic star-delta, PLC start-stop, PLC star-delta, 24 V DC control, a DC motor H-bridge, and a meter bench.
 
 **Simulation**
 - Voltage, current and power for every part, shown on the meters and in an inspector while the circuit runs.
-- Breakers trip at once on a short circuit and after a delay on overload. Overload relays heat up and trip.
+- Breakers trip at once on a short circuit and after a delay on overload. Overload relays heat up and trip, and their TEST, STOP and RESET buttons and current dial work.
+- Analog timers turn by dragging or scrolling their knob.
 - Three-phase motors run forward or reverse, in star or delta, and stall when a phase is missing.
 - Analog and digital meters, pilot lights and buzzers follow the circuit as it changes.
 

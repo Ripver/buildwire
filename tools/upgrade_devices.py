@@ -275,6 +275,56 @@ TIMER_PANELS = {
 }
 
 
+# Thermal overload relays with working front controls: TEST trips, STOP opens 95-96 while held, RESET clears a trip,
+# and the dial sets the trip current. Areas are [x, y, w, h] fractions of the photo; the dial range follows its print.
+# "seat": where the relay's body starts below its pins (fraction of its height); plugged under a contactor, everything
+# above that line sits behind the contactor.
+TOR_PANELS = {
+    "chint_nr2_25": {
+        "seat": 0.22,
+        "test": [0.46, 0.33, 0.24, 0.05], "stop": [0.47, 0.39, 0.21, 0.13], "reset": [0.70, 0.385, 0.22, 0.135],
+        "dial": {"rect": [0.09, 0.36, 0.30, 0.21], "cx": 0.24, "cy": 0.466, "r": 0.13, "min": 17, "max": 25, "start": 180, "sweep": 215},
+    },
+    "abb_tf42": {
+        "seat": 0.24,
+        "test": [0.40, 0.345, 0.18, 0.04], "stop": [0.47, 0.395, 0.17, 0.11], "reset": [0.71, 0.40, 0.22, 0.115],
+        "dial": {"rect": [0.08, 0.38, 0.29, 0.15], "cx": 0.225, "cy": 0.455, "r": 0.12, "min": 13, "max": 21, "start": 90, "sweep": 130},
+    },
+}
+
+# Analog timers whose knob turns: its centre and radius (fractions of the photo width), and the time range it covers.
+TIMER_KNOBS = {
+    "selec_800s": {"cx": 0.50, "cy": 0.502, "r": 0.24, "min": 0.5, "max": 60},
+    "multispan_dt60s": {"cx": 0.463, "cy": 0.478, "r": 0.20, "min": 0.5, "max": 60},
+    "abb_ct_c": {"cx": 0.48, "cy": 0.423, "r": 0.185, "min": 0.1, "max": 600, "log": True},
+    "abb_ct_erc_12": {"cx": 0.50, "cy": 0.622, "r": 0.167, "min": 0.5, "max": 10},
+}
+
+
+def add_controls(dev):
+    behavior = dev["behavior"]
+    if dev["id"] in TOR_PANELS:
+        panel = TOR_PANELS[dev["id"]]
+        behavior["tor_panel"] = panel
+        dial = panel["dial"]
+        for control in behavior.get("controls", []):
+            if control["key"] == "rated_current_a":
+                control.update({"min": dial["min"], "max": dial["max"], "default": dial["max"]})
+        # Held STOP is its own state: the main poles stay closed, only 95-96 opens. It looks like "normal".
+        states = dev["states"]
+        if "stop" not in states and "normal" in states:
+            stop_image = DEVICES / f'{dev["id"]}__stop.webp'
+            if not stop_image.exists():
+                shutil.copyfile(DEVICES / f'{dev["id"]}__normal.webp', stop_image)
+            states["stop"] = "stop"
+        if "stop" not in behavior.get("operate", {}).get("map", {}):
+            for contact in behavior.get("contacts", []):
+                if "normal" in contact["closed"] and "tripped" in contact["closed"] and "stop" not in contact["closed"]:
+                    contact["closed"].append("stop")
+    if dev["id"] in TIMER_KNOBS:
+        behavior["knob"] = TIMER_KNOBS[dev["id"]]
+
+
 def add_display(dev):
     if dev["id"] in TIMER_PANELS:
         dev["behavior"]["timer_panel"] = TIMER_PANELS[dev["id"]]
@@ -412,6 +462,7 @@ def main():
         if glow_id in GLOW:
             dev["behavior"]["glow"] = GLOW[glow_id]
         add_display(dev)
+        add_controls(dev)
         kept.append(dev)
     for dev in removed:
         for path in DEVICES.glob(f'{dev["id"]}__*'):

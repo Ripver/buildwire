@@ -14,6 +14,7 @@ import 'model/project.dart';
 import 'sim/ladder.dart';
 import 'sim/plc.dart';
 import 'sim/solver.dart';
+import 'sim/wire_router.dart';
 import 'sound.dart';
 import 'templates.dart';
 
@@ -50,6 +51,7 @@ class AppState extends ChangeNotifier {
   static const _themeKey = 'td-dark';
   static const _soundKey = 'td-sound';
   static const _guideKey = 'bw-guide-hidden';
+  static const _numbersKey = 'bw-wire-numbers';
   static const _gridSize = 10.0;
   static const _editReady = 'Siap. Klik dua terminal untuk menyambung. Pilih kabel lalu seret segmennya untuk mengatur jalur.';
 
@@ -287,6 +289,12 @@ class AppState extends ChangeNotifier {
   int? selectedWire;
   TerminalRef? pending;
   Offset? pointer;
+
+  /// Bends placed while drawing a wire (left-click on empty canvas), in world coordinates. The wire is drawn through
+  /// them, turning vertically first at each, the same way the finished wire's route treats manual points.
+  final List<Offset> pendingCorners = [];
+
+  static const String _drawHint = 'Klik terminal tujuan. Klik kiri di tempat kosong untuk membelokkan kabel, klik kanan atau Esc untuk batal.';
   bool jumperMode = false;
   Rect? selectionBox;
 
@@ -341,6 +349,9 @@ class AppState extends ChangeNotifier {
 
   /// The how-to panel on the right is folded away once someone has read it; it comes back from its strip.
   bool guideHidden = false;
+
+  /// Wire number markers at both ends of every wire, like printed ferrule markers in a panel.
+  bool wireNumbersOn = true;
   String status = _editReady;
   StatusKind statusKind = StatusKind.info;
 
@@ -379,7 +390,38 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  DeviceDef defOf(PlacedDevice device) => defs[device.defId]!;
+  /// A part's definition at the size it is drawn: the catalogue entry, or a copy scaled by the part's own size.
+  DeviceDef defOf(PlacedDevice device) {
+    final def = defs[device.defId]!;
+    final scale = scaleOf(device);
+    if ((scale - 1).abs() < 0.001) return def;
+    return _scaledDefs.putIfAbsent('${def.id}@$scale', () => def.scaled(scale));
+  }
+
+  final Map<String, DeviceDef> _scaledDefs = {};
+
+  static const double minScale = 0.5, maxScale = 2.0;
+
+  /// How big a part is drawn compared with its catalogue size (1 = 100%).
+  double scaleOf(PlacedDevice device) => (device.data['scale'] as num?)?.toDouble() ?? 1;
+
+  /// Resizes a part around its centre, in steps of 5%. Wrap a slider drag in beginControlEdit/endControlEdit so the
+  /// whole drag is one undo step.
+  void setDeviceScale(PlacedDevice device, double scale, {bool keepTopLeft = false}) {
+    final next = ((scale.clamp(minScale, maxScale)) * 20).roundToDouble() / 20;
+    if ((next - scaleOf(device)).abs() < 0.001) return;
+    final centre = _deviceRect(device).center;
+    final topLeft = Offset(device.x, device.y);
+    if ((next - 1).abs() < 0.001) {
+      device.data.remove('scale');
+    } else {
+      device.data['scale'] = next;
+    }
+    final def = defOf(device);
+    device.x = keepTopLeft ? topLeft.dx : centre.dx - def.width / 2;
+    device.y = keepTopLeft ? topLeft.dy : centre.dy - def.height / 2;
+    notifyListeners();
+  }
 
   String stateOf(PlacedDevice device) => running ? (simStates[device.id] ?? defOf(device).defaultState) : defOf(device).defaultState;
 
@@ -399,6 +441,7 @@ class AppState extends ChangeNotifier {
     dark = _prefs?.getBool(_themeKey) ?? false;
     soundOn = _prefs?.getBool(_soundKey) ?? true;
     guideHidden = _prefs?.getBool(_guideKey) ?? false;
+    wireNumbersOn = _prefs?.getBool(_numbersKey) ?? true;
     final saved = _prefs?.getString(_projectKey);
     if (saved == null) return;
     try {
@@ -513,6 +556,27 @@ class AppState extends ChangeNotifier {
     selectedDevices.clear();
     selectedWire = null;
     pending = null;
+    pendingCorners.clear();
+  }
+
+  /// While drawing a wire, fixes a bend at the clicked point (snapped to the grid).
+  void addPendingCorner(Offset screen) {
+    if (pending == null || running) return;
+    if (jumperMode) return; // Jumpers run straight between two terminals.
+    final world = toWorld(screen);
+    final point = Offset(_snap(world.dx), _snap(world.dy));
+    if (pendingCorners.isNotEmpty && (pendingCorners.last - point).distance < 1) return;
+    pendingCorners.add(point);
+    _setStatus('${pendingCorners.length} belokan. $_drawHint', StatusKind.info);
+    notifyListeners();
+  }
+
+  /// Stops drawing a wire without making it.
+  void cancelPending() {
+    if (pending == null) return;
+    _clearSelection();
+    _setStatus('Batal menyambung kabel.', StatusKind.info);
+    notifyListeners();
   }
 
   void _setStatus(String message, StatusKind kind) {
@@ -535,6 +599,7 @@ class AppState extends ChangeNotifier {
     if (running) stopSimulation();
     _snapshot();
     project = template.build();
+    if (template.arrange) _arrangeDevices();
     _clearSelection();
     fitView();
     _commit(template.hint);
@@ -576,6 +641,8 @@ class AppState extends ChangeNotifier {
     );
     project.devices.add(device);
     _mountOnRail(device);
+    _seatOverload(device);
+    _linkSeatedOverloads();
     selectedDevices
       ..clear()
       ..add(device.id);
@@ -613,6 +680,14 @@ class AppState extends ChangeNotifier {
         if (onIt) _carried[rider.id] = carrier.id;
       }
     }
+    // An overload relay plugged under a moved contactor goes with it.
+    for (final contactor in project.devices) {
+      if (!selectedDevices.contains(contactor.id) || !defOf(contactor).isContactor) continue;
+      for (final tor in project.devices) {
+        if (selectedDevices.contains(tor.id) || _carried.containsKey(tor.id)) continue;
+        if (_isSeatedOn(tor, contactor)) _carried[tor.id] = contactor.id;
+      }
+    }
     // Things on a carried rail ride along with the box too.
     var grew = true;
     while (grew) {
@@ -643,6 +718,7 @@ class AppState extends ChangeNotifier {
       device.x = _snap(origin.dx + delta.dx);
       device.y = _snap(origin.dy + delta.dy);
       if (!movingRail) _mountOnRail(device, ignore: selectedDevices);
+      _seatOverload(device);
     }
     for (final device in project.devices) {
       final carrierId = _carried[device.id];
@@ -655,6 +731,80 @@ class AppState extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  // ----- Overload relays plugged onto contactors
+
+  /// Where an overload relay sits plugged under a contactor: centred on its 4/T2 terminal, with the relay's pins and
+  /// clips tucked behind the contactor so only its body shows below it, as on a real starter.
+  Offset? _overloadSeat(PlacedDevice tor, PlacedDevice contactor) {
+    final tDef = defOf(tor), cDef = defOf(contactor);
+    if (!tDef.isOverloadRelay || !cDef.isContactor) return null;
+    final pin = tDef.terminals.where((t) => t.id == '3').firstOrNull;
+    final socket = cDef.terminals.where((t) => t.id == '4').firstOrNull;
+    if (pin == null || socket == null) return null;
+    final seat = (tDef.torPanel?['seat'] as num?)?.toDouble() ?? 0.2;
+    return Offset(contactor.x + socket.x * cDef.width - pin.x * tDef.width, contactor.y + cDef.height - seat * tDef.height);
+  }
+
+  /// Whether an overload relay is plugged under this contactor.
+  bool hasSeatedOverload(PlacedDevice contactor) =>
+      defOf(contactor).isContactor && project.devices.any((d) => (d.data['seated_on'] as num?)?.toInt() == contactor.id);
+
+  bool _isSeatedOn(PlacedDevice tor, PlacedDevice contactor) {
+    final seat = _overloadSeat(tor, contactor);
+    return seat != null && (Offset(tor.x, tor.y) - seat).distance < 1;
+  }
+
+  /// How close (px) an overload relay must come to its seat under a contactor to plug in.
+  static const double _seatReach = 70;
+
+  /// Snaps an overload relay onto the nearest contactor whose seat it is close to.
+  void _seatOverload(PlacedDevice tor) {
+    if (!defOf(tor).isOverloadRelay) return;
+    Offset? best;
+    var bestDistance = _seatReach;
+    for (final contactor in project.devices) {
+      final seat = _overloadSeat(tor, contactor);
+      if (seat == null) continue;
+      final distance = (Offset(tor.x, tor.y) - seat).distance;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = seat;
+      }
+    }
+    if (best == null) return;
+    tor.x = best.dx;
+    tor.y = best.dy;
+  }
+
+  /// Records which contactor each overload relay is plugged under. The connection itself is internal (the solver
+  /// joins 2-1, 4-3 and 6-5), so no wire is drawn; pulling the relay off ends it.
+  void _linkSeatedOverloads() {
+    for (final tor in project.devices) {
+      if (!defOf(tor).isOverloadRelay) continue;
+      final seatedOn = project.devices.where((c) => defOf(c).isContactor && _isSeatedOn(tor, c)).firstOrNull;
+      if (seatedOn == null) {
+        tor.data.remove('seated_on');
+      } else {
+        tor.data['seated_on'] = seatedOn.id;
+        // Wires that only joined the pins the relay now plugs into have nothing left to do.
+        for (final (c, t) in const [('2', '1'), ('4', '3'), ('6', '5')]) {
+          project.wires.removeWhere((w) => w.connects(TerminalRef(seatedOn.id, c), TerminalRef(tor.id, t)));
+        }
+      }
+    }
+  }
+
+  /// The relay's 1/3/5 pins once it is plugged under a contactor: they are behind the contactor and cannot take a
+  /// wire. The contactor's 2/4/6 stay usable; they carry straight on into the relay.
+  bool terminalCovered(TerminalRef ref) {
+    final device = _device(ref.deviceId);
+    if (device == null) return false;
+    return device.data['seated_on'] != null && const {'1', '3', '5'}.contains(ref.terminal);
+  }
+
+  /// Whether this part is an overload relay plugged under a contactor (it is drawn over the contactor).
+  bool isSeated(PlacedDevice device) => device.data['seated_on'] != null;
 
   /// How far (px) from a rail's centre line a device still clips onto it.
   static const double _railReach = 48;
@@ -714,6 +864,7 @@ class AppState extends ChangeNotifier {
   void endMove() {
     final before = _dragBefore;
     _dragBefore = null;
+    _linkSeatedOverloads();
     if (before == null || before == jsonEncode(project.toJson())) return;
     _undo.add(before);
     if (_undo.length > 100) _undo.removeAt(0);
@@ -945,6 +1096,122 @@ class AppState extends ChangeNotifier {
     _commit('Jalur kabel dirapikan otomatis.');
   }
 
+  // ----- Automatic layout
+
+  /// Where a part goes in the automatic layout: the power side runs top to bottom on the left (supply, protection,
+  /// contactors, overload, loads), the control side on the right (buttons, lights, the rest). -1: leave it alone.
+  static int _layoutRow(DeviceDef def) {
+    if (def.isBackLayer || def.isJunction || def.isSymbol) return -1;
+    final group = def.group ?? '';
+    const supply = {'Sumber AC/DC', 'Trafo'};
+    const protection = {'MCB', 'MCCB', 'MPCB', 'RCCB'};
+    const switching = {'Kontaktor', 'Kontak bantu', 'Inverter (VFD)'};
+    const overload = {'Overload relay (TOR)'};
+    const loads = {'Motor', 'Beban', 'Stopkontak'};
+    const buttons = {'Tombol tekan', 'Tombol darurat', 'Selektor', 'Saklar'};
+    const lights = {'Lampu indikator dan buzzer'};
+    if (supply.contains(group) || def.kind == 'source') return 0;
+    if (protection.contains(group)) return 1;
+    if (switching.contains(group)) return 2;
+    if (overload.contains(group)) return 3;
+    if (loads.contains(group) || def.kind == 'motor3' || def.rotor != null) return 4;
+    if (buttons.contains(group)) return 10;
+    if (lights.contains(group)) return 11;
+    return 12;
+  }
+
+  /// Lays the parts out the way a panel drawing is usually read, then lets the router lay every wire again. Rows are
+  /// ordered so parts sit under the parts they are wired to, which keeps wires short and straight. One undo step.
+  void autoArrange() {
+    if (running) return;
+    if (project.devices.where((d) => _layoutRow(defOf(d)) >= 0).length < 2) return;
+    _snapshot();
+    _arrangeDevices();
+    _clearSelection();
+    fitView();
+    _commit('Perangkat ditata otomatis: rangkaian daya di kiri, kontrol di kanan. Tekan Ctrl+Z untuk membatalkan.');
+  }
+
+  /// The layout itself, without an undo step: used by the menu command and by ready-made circuits that ask for it.
+  void _arrangeDevices() {
+    final movable = [for (final d in project.devices) if (_layoutRow(defOf(d)) >= 0) d];
+    if (movable.length < 2) return;
+    var left = double.infinity, top = double.infinity;
+    for (final d in movable) {
+      left = math.min(left, d.x);
+      top = math.min(top, d.y);
+    }
+    final rows = <int, List<PlacedDevice>>{};
+    for (final d in movable) {
+      rows.putIfAbsent(_layoutRow(defOf(d)), () => []).add(d);
+    }
+    int byTag(PlacedDevice p, PlacedDevice q) => _naturalTag(p.tag).compareTo(_naturalTag(q.tag));
+    final neighbours = <int, Set<int>>{};
+    for (final w in project.wires) {
+      neighbours.putIfAbsent(w.a.deviceId, () => {}).add(w.b.deviceId);
+      neighbours.putIfAbsent(w.b.deviceId, () => {}).add(w.a.deviceId);
+    }
+    final centreX = <int, double>{};
+    const gapX = 90.0, gapY = 150.0, sideGap = 220.0;
+
+    /// Places one band of rows starting at [x0]; returns the right edge it reached.
+    double band(List<int> keys, double x0) {
+      var y = top;
+      var right = x0;
+      for (final key in keys) {
+        final row = rows[key];
+        if (row == null || row.isEmpty) continue;
+        // Under the parts they connect to; parts with no placed neighbour keep tag order after them.
+        double? bary(PlacedDevice d) {
+          final xs = [for (final n in neighbours[d.id] ?? const <int>{}) if (centreX.containsKey(n)) centreX[n]!];
+          return xs.isEmpty ? null : xs.reduce((a, b) => a + b) / xs.length;
+        }
+
+        row.sort((p, q) {
+          final bp = bary(p), bq = bary(q);
+          if (bp != null && bq != null && (bp - bq).abs() > 1) return bp.compareTo(bq);
+          if (bp != null && bq == null) return -1;
+          if (bp == null && bq != null) return 1;
+          return byTag(p, q);
+        });
+        var x = x0;
+        var height = 0.0;
+        for (final d in row) {
+          final def = defOf(d);
+          d.x = _snap(x);
+          d.y = _snap(y);
+          centreX[d.id] = d.x + def.width / 2;
+          x += def.width + gapX;
+          height = math.max(height, def.height);
+        }
+        right = math.max(right, x - gapX);
+        y += height + gapY;
+      }
+      return right;
+    }
+
+    final powerRight = band(const [0, 1, 2, 3, 4], left);
+    band(const [10, 11, 12], powerRight + sideGap);
+    // Junctions follow: each sits at the middle of the terminals it joins, so its wires stay short.
+    for (final junction in project.devices.where((d) => defOf(d).isJunction)) {
+      final ends = [
+        for (final w in project.wires)
+          if (w.touches(junction.id)) terminalWorld(w.a.deviceId == junction.id ? w.b : w.a),
+      ];
+      if (ends.isEmpty) continue;
+      final def = defOf(junction);
+      final centre = ends.reduce((a, b) => a + b) / ends.length.toDouble();
+      junction.x = _snap(centre.dx - def.width / 2);
+      junction.y = _snap(centre.dy - def.height / 2);
+    }
+    for (final wire in project.wires) {
+      wire.points = null;
+    }
+  }
+
+  /// "KM10" sorts after "KM9".
+  static String _naturalTag(String tag) => tag.replaceAllMapped(RegExp(r'\d+'), (m) => m.group(0)!.padLeft(4, '0'));
+
   void resetAllRoutes() {
     if (running || project.wires.every((wire) => wire.points == null)) return;
     _snapshot();
@@ -987,9 +1254,10 @@ class AppState extends ChangeNotifier {
     final start = pending;
     if (start == null) {
       pending = ref;
+      pendingCorners.clear();
       selectedDevices.clear();
       selectedWire = null;
-      _setStatus('Klik terminal tujuan. Tekan Esc untuk batal.', StatusKind.info);
+      _setStatus(_drawHint, StatusKind.info);
       notifyListeners();
       return;
     }
@@ -1012,8 +1280,11 @@ class AppState extends ChangeNotifier {
       color: jumperMode ? Wire.jumperColor : _autoColor(start, ref),
       gauge: jumperMode ? 2.5 : 1.5,
     );
+    // Bends placed while drawing become the wire's own route; without any, the router lays it.
+    if (!jumperMode && pendingCorners.isNotEmpty) wire.points = [for (final p in pendingCorners) WirePoint(p.dx, p.dy)];
     project.wires.add(wire);
     pending = null;
+    pendingCorners.clear();
     selectedWire = wire.id;
     _sound.play('wire_connect', soundOn);
     final what = jumperMode ? 'Jumper' : 'Kabel';
@@ -1052,8 +1323,16 @@ class AppState extends ChangeNotifier {
     project.wires
       ..add(half(wire.a, here))
       ..add(half(here, wire.b))
-      ..add(Wire(id: project.nextId(), a: start, b: here, color: wire.color, gauge: wire.gauge));
+      ..add(Wire(
+        id: project.nextId(),
+        a: start,
+        b: here,
+        color: wire.color,
+        gauge: wire.gauge,
+        points: pendingCorners.isEmpty ? null : [for (final p in pendingCorners) WirePoint(p.dx, p.dy)],
+      ));
     pending = null;
+    pendingCorners.clear();
     selectedWire = null;
     _sound.play('wire_connect', soundOn);
     _commit('Kabel bercabang dari ${tagOf(start.deviceId)} ${start.terminal}.');
@@ -1184,6 +1463,92 @@ class AppState extends ChangeNotifier {
 
   String sideOf(TerminalRef ref) => defOf(_device(ref.deviceId)!).terminals.firstWhere((t) => t.id == ref.terminal).side;
 
+  /// The side a wire leaves a terminal by. Usually the side the catalogue gives; but a terminal far inside a big part
+  /// (the lower row of a motor's terminal box is marked "bottom" yet sits near the top of the motor) leaves by the
+  /// nearest edge instead, so its wire does not loop all the way around the part. An edge is only used when the
+  /// straight way out does not pass over another terminal of the same part, which would look like a connection.
+  String _exitSide(TerminalRef ref) {
+    final side = sideOf(ref);
+    if (side == 'center') return side;
+    final device = _device(ref.deviceId)!;
+    final def = defOf(device);
+    final rect = _deviceRect(device);
+    final p = terminalWorld(ref);
+    final gaps = {'top': p.dy - rect.top, 'bottom': rect.bottom - p.dy, 'left': p.dx - rect.left, 'right': rect.right - p.dx};
+    final size = side == 'top' || side == 'bottom' ? rect.height : rect.width;
+    if ((gaps[side] ?? 0) <= size * 0.35) return side;
+    final others = [
+      for (final t in def.terminals)
+        if (t.id != ref.terminal) Offset(device.x + t.x * def.width, device.y + t.y * def.height),
+    ];
+    bool clear(String edge) => others.every((o) => switch (edge) {
+          'top' => (o.dx - p.dx).abs() > 6 || o.dy >= p.dy,
+          'bottom' => (o.dx - p.dx).abs() > 6 || o.dy <= p.dy,
+          'left' => (o.dy - p.dy).abs() > 6 || o.dx >= p.dx,
+          _ => (o.dy - p.dy).abs() > 6 || o.dx <= p.dx,
+        });
+    final nearest = gaps.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
+    for (final edge in nearest) {
+      if (edge.value > size * 0.35 && edge.key != side) continue;
+      if (clear(edge.key)) return edge.key;
+    }
+    return side;
+  }
+
+  /// How a wire leaves a terminal for the full router: the bends on the way (usually none) and the exit point past
+  /// the part's edge. A terminal whose straight way out to the nearest edge passes over another terminal (the lower
+  /// row of a motor's terminal box) steps around it: halfway towards that terminal, sideways into the gap between
+  /// terminals, then out.
+  (List<Offset>, Offset) _stub(TerminalRef ref) {
+    final device = _device(ref.deviceId)!;
+    final rect = _deviceRect(device);
+    final p = terminalWorld(ref);
+    final side = _exitSide(ref);
+    final declared = sideOf(ref);
+    final straight = (const <Offset>[], _exit(side, p, rect));
+    if (side == 'center') return straight;
+    // _exitSide fell back to the declared side only when every nearer edge was blocked; only then is a dogleg worth it.
+    final gaps = {'top': p.dy - rect.top, 'bottom': rect.bottom - p.dy, 'left': p.dx - rect.left, 'right': rect.right - p.dx};
+    final size = declared == 'top' || declared == 'bottom' ? rect.height : rect.width;
+    if (side != declared || (gaps[declared] ?? 0) <= size * 0.35) return straight;
+    final def = defOf(device);
+    final others = [
+      for (final t in def.terminals)
+        if (t.id != ref.terminal) Offset(device.x + t.x * def.width, device.y + t.y * def.height),
+    ];
+    final nearest = gaps.entries.reduce((a, b) => a.value <= b.value ? a : b).key;
+    final vertical = nearest == 'top' || nearest == 'bottom';
+    final toward = nearest == 'top' || nearest == 'left' ? -1.0 : 1.0;
+    // The terminal in the way: the closest one along the straight line to the nearest edge.
+    Offset? block;
+    for (final o in others) {
+      final inLine = vertical ? (o.dx - p.dx).abs() <= 6 : (o.dy - p.dy).abs() <= 6;
+      final ahead = vertical ? (o.dy - p.dy) * toward > 0 : (o.dx - p.dx) * toward > 0;
+      if (!inLine || !ahead) continue;
+      if (block == null || (vertical ? (o.dy - p.dy).abs() < (block.dy - p.dy).abs() : (o.dx - p.dx).abs() < (block.dx - p.dx).abs())) block = o;
+    }
+    if (block == null) return straight;
+    // Halfway to it, then sideways by half the spacing to its neighbours in that row, then out.
+    final along = vertical ? (p.dy + block.dy) / 2 : (p.dx + block.dx) / 2;
+    final row = [for (final o in others) if (vertical ? (o.dy - block.dy).abs() <= 6 : (o.dx - block.dx).abs() <= 6) vertical ? o.dx : o.dy];
+    final here = vertical ? block.dx : block.dy;
+    var spacing = double.infinity;
+    for (final v in row) {
+      if ((v - here).abs() > 1) spacing = math.min(spacing, (v - here).abs());
+    }
+    final half = spacing.isFinite ? spacing / 2 : 12.0;
+    for (final sign in const [-1.0, 1.0]) {
+      final across = here + sign * half;
+      final ok = others.every((o) => vertical ? (o.dx - across).abs() > 4 || (o.dy - along) * toward < 0 : (o.dy - across).abs() > 4 || (o.dx - along) * toward < 0);
+      if (!ok) continue;
+      final bend1 = vertical ? Offset(p.dx, along) : Offset(along, p.dy);
+      final bend2 = vertical ? Offset(across, along) : Offset(along, across);
+      final exit = _exit(nearest, bend2, rect);
+      return ([bend1, bend2], exit);
+    }
+    return straight;
+  }
+
   Rect _deviceRect(PlacedDevice device) {
     final def = defOf(device);
     return Rect.fromLTWH(device.x, device.y, def.width, def.height);
@@ -1221,7 +1586,9 @@ class AppState extends ChangeNotifier {
 
   /// Changes whenever a device moves or a wire changes, so routes are worked out once per change, not per call.
   int _geometryKey() => Object.hashAll([
-        for (final d in project.devices) ...[d.id, d.defId, d.x, d.y],
+        // While something is dragged the quick routes are used, so the full routing runs again on release.
+        _dragBefore != null,
+        for (final d in project.devices) ...[d.id, d.defId, d.x, d.y, d.data['scale']],
         for (final w in project.wires) ...[w.id, w.a.key, w.b.key, w.isJumper, ...?w.points?.expand((p) => [p.x, p.y])],
       ]);
 
@@ -1231,6 +1598,18 @@ class AppState extends ChangeNotifier {
   Map<int, List<Offset>> _routeAll() {
     final routes = {for (final wire in project.wires) wire.id: _baseRoute(wire)};
     final movable = {for (final wire in project.wires) if (!wire.isJumper && wire.points == null) wire.id};
+    // Full routing when nothing is being dragged; the quick routes above keep dragging smooth.
+    if (_dragBefore == null && movable.isNotEmpty) {
+      final requests = <WireRequest>[];
+      for (final wire in project.wires) {
+        if (!movable.contains(wire.id)) continue;
+        final a = terminalWorld(wire.a), b = terminalWorld(wire.b);
+        final (viaA, exitA) = _stub(wire.a);
+        final (viaB, exitB) = _stub(wire.b);
+        requests.add(WireRequest(wire.id, a, exitA, exitB, b, viaA: viaA, viaB: viaB));
+      }
+      routes.addAll(WireRouter(_obstacles.toList()).routeAll(requests));
+    }
     for (var pass = 0; pass < 2; pass++) {
       _spread(routes, movable, horizontal: true);
       _spread(routes, movable, horizontal: false);
@@ -1321,8 +1700,8 @@ class AppState extends ChangeNotifier {
       }
       return route;
     }
-    final sideA = sideOf(wire.a);
-    final sideB = sideOf(wire.b);
+    final sideA = _exitSide(wire.a);
+    final sideB = _exitSide(wire.b);
     final rectA = _deviceRect(_device(wire.a.deviceId)!);
     final rectB = _deviceRect(_device(wire.b.deviceId)!);
     final exitA = _exit(sideA, a, rectA);
@@ -1372,8 +1751,7 @@ class AppState extends ChangeNotifier {
 
   List<Offset> wirePoints(Wire wire) => [for (final point in routeWorld(wire)) toScreen(point)];
 
-  Wire? wireAt(Offset screen) {
-    const tolerance = 7.0;
+  Wire? wireAt(Offset screen, {double tolerance = 7}) {
     for (final wire in project.wires.reversed) {
       final points = wirePoints(wire);
       for (var i = 0; i < points.length - 1; i++) {
@@ -1681,7 +2059,8 @@ class AppState extends ChangeNotifier {
     if (time == null) {
       plc.data.remove('rtc_offset_s');
     } else {
-      plc.data['rtc_offset_s'] = time.difference(_now()).inSeconds;
+      // Rounded up, so a clock set to 10:30 reads 10:30:00 straight away rather than 10:29:59.
+      plc.data['rtc_offset_s'] = (time.difference(_now()).inMilliseconds / 1000).ceil();
     }
     _autosave();
     if (running) _apply(_solve(simStates));
@@ -1706,6 +2085,62 @@ class AppState extends ChangeNotifier {
     timer.timeSeconds = (seconds * 10).roundToDouble() / 10;
     _autosave();
     _logEvent('${timer.tag}: waktu diatur ke ${timer.timeSeconds!.toStringAsFixed(1)} dtk.');
+  }
+
+  // ----- Overload relay front and timer knobs
+
+  /// A control on an overload relay's front was pressed or released: TEST trips it, STOP opens 95-96 for as long as
+  /// it is held, RESET clears a trip (and lets the relay cool at once).
+  void torKey(PlacedDevice tor, String key, bool down) {
+    if (!running || wrecked) return;
+    final state = simStates[tor.id] ?? defOf(tor).defaultState;
+    switch (key) {
+      case 'test':
+        if (down && state != 'tripped') {
+          _setDeviceState(tor, 'tripped');
+          _logEvent('${tor.tag}: tombol TEST ditekan, relay trip.');
+        }
+      case 'stop':
+        if (down && state == 'normal') {
+          _setDeviceState(tor, 'stop');
+        } else if (!down && state == 'stop') {
+          _setDeviceState(tor, 'normal');
+        }
+      case 'reset':
+        if (down && state == 'tripped') {
+          _thermal.remove(tor.id);
+          _setDeviceState(tor, 'normal');
+          _logEvent('${tor.tag}: di-reset.');
+        }
+    }
+  }
+
+  /// Turns an overload relay's current dial, in 0.5 A steps within the dial's printed range.
+  void setTorCurrent(PlacedDevice tor, double amps) {
+    final dial = defOf(tor).torPanel?['dial'] as Map<String, dynamic>?;
+    if (dial == null) return;
+    final value = (amps.clamp((dial['min'] as num).toDouble(), (dial['max'] as num).toDouble()) * 2).roundToDouble() / 2;
+    if (value == number(tor, 'rated_current_a')) return;
+    setControl(tor, 'rated_current_a', value);
+  }
+
+  /// A control value of a part, or its default.
+  double number(PlacedDevice device, String key) {
+    final control = defOf(device).controls.where((c) => c.key == key).firstOrNull;
+    return device.number(key, control?.fallback ?? 0);
+  }
+
+  /// Turns an analog timer's knob. While turning, only the setting changes; [done] saves it and logs the new time.
+  void turnTimerKnob(PlacedDevice timer, double seconds, {bool done = false}) {
+    final knob = defOf(timer).knob;
+    if (knob == null) return;
+    final value = seconds.clamp((knob['min'] as num).toDouble(), (knob['max'] as num).toDouble());
+    timer.timeSeconds = value >= 10 ? value.roundToDouble() : (value * 10).roundToDouble() / 10;
+    if (done) {
+      _autosave();
+      _logEvent('${timer.tag}: waktu diatur ke ${timer.timeSeconds!.toStringAsFixed(1)} dtk.');
+    }
+    notifyListeners();
   }
 
   /// Settings a dial timer clicks through, in seconds.
@@ -2312,6 +2747,72 @@ class AppState extends ChangeNotifier {
     dark = !dark;
     _prefs?.setBool(_themeKey, dark);
     notifyListeners();
+  }
+
+  void toggleWireNumbers() {
+    wireNumbersOn = !wireNumbersOn;
+    _prefs?.setBool(_numbersKey, wireNumbersOn);
+    notifyListeners();
+  }
+
+  /// The number shown on a wire's markers: the one typed in its properties, or else the number of its potential.
+  /// Every wire on one potential (joined by wires, jumpers or junctions) carries the same number, the way panel
+  /// builders mark them. A potential that starts at a supply terminal takes that terminal's name (L1, L2, L3, N, PE);
+  /// the rest are numbered 1, 2, 3 from the top left.
+  String wireLabel(Wire wire) {
+    if (wire.number.isNotEmpty) return wire.number;
+    final key = Object.hashAll([for (final w in project.wires) ...[w.id, w.a.key, w.b.key], for (final d in project.devices) ...[d.id, d.x, d.y]]);
+    if (key != _netKey) {
+      _netLabels = _numberNets();
+      _netKey = key;
+    }
+    return _netLabels[wire.id] ?? '';
+  }
+
+  int _netKey = -1;
+  Map<int, String> _netLabels = const {};
+
+  Map<int, String> _numberNets() {
+    final parent = <String, String>{};
+    String find(String k) {
+      var root = k;
+      while (parent[root] != null && parent[root] != root) {
+        root = parent[root]!;
+      }
+      parent[k] = root;
+      return root;
+    }
+
+    for (final w in project.wires) {
+      parent.putIfAbsent(w.a.key, () => w.a.key);
+      parent.putIfAbsent(w.b.key, () => w.b.key);
+      final a = find(w.a.key), b = find(w.b.key);
+      if (a != b) parent[a] = b;
+    }
+    // Name a potential after a supply terminal on it; otherwise order potentials by their top-left terminal.
+    final names = <String, String>{};
+    final firstPoint = <String, Offset>{};
+    for (final w in project.wires) {
+      for (final end in [w.a, w.b]) {
+        final net = find(end.key);
+        final device = _device(end.deviceId);
+        if (device == null) continue;
+        final def = defOf(device);
+        if (def.kind == 'source' && !names.containsKey(net)) names[net] = end.terminal;
+        final p = terminalWorld(end);
+        final seen = firstPoint[net];
+        if (seen == null || p.dy < seen.dy - 1 || ((p.dy - seen.dy).abs() <= 1 && p.dx < seen.dx)) firstPoint[net] = p;
+      }
+    }
+    final unnamed = firstPoint.keys.where((n) => !names.containsKey(n)).toList()
+      ..sort((p, q) {
+        final a = firstPoint[p]!, b = firstPoint[q]!;
+        return (a.dy - b.dy).abs() > 1 ? a.dy.compareTo(b.dy) : a.dx.compareTo(b.dx);
+      });
+    for (var i = 0; i < unnamed.length; i++) {
+      names[unnamed[i]] = '${i + 1}';
+    }
+    return {for (final w in project.wires) w.id: names[find(w.a.key)] ?? ''};
   }
 
   void toggleGuide() {

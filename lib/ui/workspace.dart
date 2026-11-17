@@ -364,6 +364,7 @@ class _Toolbar extends StatelessWidget {
           item('Perbesar', () => app.zoomStep(1.2), shortcut: 'Ctrl+='),
           item('Perkecil', () => app.zoomStep(1 / 1.2), shortcut: 'Ctrl+-'),
           item('Muat semua', app.fitView, shortcut: 'Ctrl+0'),
+          item(app.wireNumbersOn ? 'Sembunyikan nomor kabel' : 'Tampilkan nomor kabel', app.toggleWireNumbers, key: const ValueKey('toggle-wire-numbers')),
           item(app.dark ? 'Tema terang' : 'Tema gelap', app.toggleTheme),
           item(app.soundOn ? 'Matikan suara' : 'Nyalakan suara', app.toggleSound),
         ]),
@@ -382,6 +383,7 @@ class _Toolbar extends StatelessWidget {
         menu('Alat', [
           item('Buka SCADA', () => showScada(context, app), key: const ValueKey('open-scada')),
           item('Rapikan semua kabel', editing ? app.resetAllRoutes : null),
+          item('Tata letak otomatis', editing && app.project.devices.length > 1 ? app.autoArrange : null, key: const ValueKey('auto-arrange')),
         ]),
         menu('Output', [
           item('Daftar material', onMaterials),
@@ -544,7 +546,7 @@ class _Toolbar extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Versi 1.1', style: uiText(13, tokens.textMuted)),
+              Text('Versi 1.2', style: uiText(13, tokens.textMuted)),
               const SizedBox(height: 14),
               Text(
                 'Simulator menghitung tegangan, arus, dan daya pada kondisi tunak dengan beban impedansi tetap. Jatuh tegangan, '

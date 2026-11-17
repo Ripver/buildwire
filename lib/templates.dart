@@ -2,13 +2,17 @@ import 'model/project.dart';
 
 /// Starter circuits offered when creating a project.
 class CircuitTemplate {
-  const CircuitTemplate(this.id, this.name, this.description, this.build, this.hint);
+  const CircuitTemplate(this.id, this.name, this.description, this.build, this.hint, {this.arrange = false});
 
   final String id;
   final String name;
   final String description;
   final Project Function() build;
   final String hint;
+
+  /// Laid out by the automatic layout when opened (power on the left, controls on the right) instead of the
+  /// positions in [build]. Set where that measured fewer crossings and shorter wires than the hand layout.
+  final bool arrange;
 }
 
 const _brown = 0xFF8A5A2B;
@@ -508,17 +512,17 @@ final List<CircuitTemplate> kTemplates = [
   CircuitTemplate('lamp', 'Lampu lewat kontaktor', 'Rangkaian paling dasar: MCB, tombol, kontaktor, lampu.', buildLampExample,
       'Tekan Jalankan, nyalakan QF1, lalu tahan tombol S1.'),
   CircuitTemplate('dol', 'DOL: start-stop motor', 'Motor 3 fasa dengan self-holding, overload, dan lampu indikator.', buildDol,
-      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1. Tekan S0 untuk berhenti.'),
+      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1. Tekan S0 untuk berhenti.', arrange: true),
   CircuitTemplate('reversing', 'Motor bolak-balik', 'Forward-reverse dengan interlock kontak NC.', buildReversing,
-      'Tekan Jalankan, nyalakan QF1 dan F2. S1 maju, S2 mundur, S0 berhenti.'),
+      'Tekan Jalankan, nyalakan QF1 dan F2. S1 maju, S2 mundur, S0 berhenti.', arrange: true),
   CircuitTemplate('stardelta', 'Star-delta otomatis', 'Start bintang, pindah ke segitiga lewat timer 5 detik.', buildStarDelta,
-      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1 dan tunggu timer.'),
+      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1 dan tunggu timer.', arrange: true),
   CircuitTemplate('plc', 'PLC', 'Start-stop motor lewat program ladder di Siemens LOGO.', buildPlc,
-      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1 untuk start dan S2 untuk stop.'),
+      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1 untuk start dan S2 untuk stop.', arrange: true),
   CircuitTemplate('plc_stardelta', 'PLC: star-delta', 'Star-delta lewat ladder Siemens LOGO, pakai timer T1 di dalam PLC.', buildPlcStarDelta,
-      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1. Waktu T1 bisa diubah lewat ESC, Set Param di PLC.'),
+      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1. Waktu T1 bisa diubah lewat ESC, Set Param di PLC.', arrange: true),
   CircuitTemplate('dc_control', 'Kontrol 24 V DC', 'Tombol dan relay 24 V DC menggerakkan kontaktor 230 V dan motor.', buildDcControl,
-      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1. Rangkaian tombol hanya 24 V DC.'),
+      'Tekan Jalankan, nyalakan QF1 dan F2, lalu klik S1. Rangkaian tombol hanya 24 V DC.', arrange: true),
   CircuitTemplate('dc_motor', 'Motor DC maju-mundur', 'Dua relay sebagai H-bridge dengan interlock; kecepatan ikut tegangan.', buildDcMotor,
       'Tekan Jalankan. S1 maju, S2 mundur, S0 berhenti. Klik G1 dan geser tegangannya untuk mengatur kecepatan.'),
   CircuitTemplate('meters', 'Bangku ukur', 'Sumber yang bisa diatur, lampu, voltmeter, dan frekuensi meter.', buildMeterBench,

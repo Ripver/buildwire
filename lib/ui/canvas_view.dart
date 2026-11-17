@@ -80,7 +80,10 @@ class _CanvasViewState extends State<CanvasView> with SingleTickerProviderStateM
   Widget _canvas(BuildContext context) {
     final tokens = context.tokens;
     final ordered = [
-      for (final rank in const [0, 1, 2]) ...app.project.devices.where((d) => app.defOf(d).layerRank == rank),
+      for (final rank in const [0, 1]) ...app.project.devices.where((d) => app.defOf(d).layerRank == rank),
+      // Overload relays plugged under a contactor go behind it, so their pins and clips are hidden by it.
+      ...app.project.devices.where(app.isSeated),
+      ...app.project.devices.where((d) => app.defOf(d).layerRank == 2 && !app.isSeated(d)),
     ];
     final wire = app.selectedWireObject;
     return LayoutBuilder(
@@ -109,10 +112,15 @@ class _CanvasViewState extends State<CanvasView> with SingleTickerProviderStateM
                     if (tapped != null && app.pending != null) {
                       // Connecting to the middle of a wire branches off it.
                       app.branchToWire(tapped, details.localPosition);
+                    } else if (app.pending != null) {
+                      // Drawing a wire: a click on empty canvas fixes a bend there.
+                      app.addPendingCorner(details.localPosition);
                     } else {
                       tapped == null ? app.clearSelection() : app.selectWire(tapped.id);
                     }
                   },
+                  // Right-click while drawing a wire drops it.
+                  onSecondaryTapUp: (_) => app.cancelPending(),
                   onPanStart: (details) {
                     final selecting = app.tool == CanvasTool.select && !app.running;
                     if (selecting && !HardwareKeyboard.instance.isControlPressed) app.beginBox(details.localPosition);
@@ -140,6 +148,10 @@ class _CanvasViewState extends State<CanvasView> with SingleTickerProviderStateM
                         for (final device in ordered)
                           if (app.defOf(device).meter != null) _MeterDisplay(app: app, device: device),
                         for (final device in ordered)
+                          if (app.defOf(device).torPanel != null) _TorPanelView(key: ValueKey('tor-${device.id}'), app: app, device: device),
+                        for (final device in ordered)
+                          if (app.defOf(device).knob != null) _KnobView(key: ValueKey('knob-${device.id}'), app: app, device: device),
+                        for (final device in ordered)
                           if (app.defOf(device).panel != null) _PlcPanelView(key: ValueKey('panel-${device.id}'), app: app, device: device),
                         for (final device in ordered)
                           if (app.defOf(device).timerPanel != null) _TimerPanelView(key: ValueKey('timer-panel-${device.id}'), app: app, device: device),
@@ -153,8 +165,11 @@ class _CanvasViewState extends State<CanvasView> with SingleTickerProviderStateM
                           if (app.defOf(device).kind == 'hmi') _HmiScreen(app: app, device: device),
                         if (!app.running)
                           for (final device in ordered)
-                            for (final terminal in app.defOf(device).terminals) _TerminalDot(app: app, ref: TerminalRef(device.id, terminal.id), tag: device.tag),
+                            for (final terminal in app.defOf(device).terminals)
+                              if (!app.terminalCovered(TerminalRef(device.id, terminal.id))) _TerminalDot(app: app, ref: TerminalRef(device.id, terminal.id), tag: device.tag),
                         if (!app.running && wire != null && !wire.isJumper) ..._segmentHandles(wire),
+                        if (!app.running && app.tool == CanvasTool.select && app.singleSelection != null)
+                          _ResizeHandle(key: ValueKey('resize-${app.singleSelection!.id}'), app: app, device: app.singleSelection!),
                         if (app.selectionBox != null)
                           Positioned.fromRect(
                             rect: app.selectionBox!,
@@ -359,10 +374,25 @@ class _DeviceViewState extends State<_DeviceView> {
     }
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () {
+      onTapUp: (details) {
         widget.focusNode.requestFocus();
-        app.selectDevice(device.id, additive: HardwareKeyboard.instance.isShiftPressed);
+        // Wires are drawn over parts, so a click on a wire (a jumper between two terminals of this part, or a wire
+        // passing over it) picks the wire; anywhere else on the part picks the part.
+        final onCanvas = app.toScreen(Offset(device.x, device.y)) + details.localPosition;
+        // While drawing a wire, a click on a part (not on a terminal) is a bend, as on empty canvas.
+        if (app.pending != null) {
+          app.addPendingCorner(onCanvas);
+          return;
+        }
+        // A tighter reach than on the open canvas, so clicking the part next to one of its own wires still picks the part.
+        final wire = app.wireAt(onCanvas, tolerance: 5);
+        if (wire != null) {
+          app.selectWire(wire.id);
+        } else {
+          app.selectDevice(device.id, additive: HardwareKeyboard.instance.isShiftPressed);
+        }
       },
+      onSecondaryTapUp: (_) => app.cancelPending(),
       onPanStart: (_) {
         widget.focusNode.requestFocus();
         app.beginMove(device.id);
@@ -389,11 +419,13 @@ class _TagLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final def = app.defOf(device);
-    final position = app.toScreen(Offset(device.x, device.y + def.height));
+    // With an overload relay plugged underneath, the tag goes above the part instead of over the relay's front.
+    final above = app.hasSeatedOverload(device);
+    final position = app.toScreen(Offset(device.x, above ? device.y : device.y + def.height));
     final selected = app.isSelected(device.id);
     return Positioned(
       left: position.dx - 20,
-      top: position.dy + 4 * app.zoom,
+      top: above ? position.dy - 24 * app.zoom.clamp(0.6, 1.4) : position.dy + 4 * app.zoom,
       width: def.width * app.zoom + 40,
       child: IgnorePointer(
         child: Center(
@@ -1087,6 +1119,302 @@ class _PlcScreen extends StatelessWidget {
 }
 
 
+/// A pointer drawn on a round dial: [fraction] 0..1 of the way round a 270° sweep from bottom-left, clockwise.
+class _DialPointerPainter extends CustomPainter {
+  const _DialPointerPainter(this.centre, this.radius, this.fraction, this.color, {this.start = 225, this.sweep = 270});
+
+  /// Where the scale starts (degrees, counter-clockwise from 3 o'clock) and how far it runs clockwise.
+  final double start;
+  final double sweep;
+
+  final Offset centre;
+  final double radius;
+  final double fraction;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final angle = (start - sweep * fraction.clamp(0.0, 1.0)) * math.pi / 180;
+    final tip = centre + Offset(math.cos(angle), -math.sin(angle)) * radius * 0.82;
+    final width = math.max(2.0, radius * 0.12);
+    canvas.drawLine(centre, tip, Paint()
+      ..color = const Color(0xCC15191C)
+      ..strokeWidth = width + 2.5
+      ..strokeCap = StrokeCap.round);
+    canvas.drawLine(centre, tip, Paint()
+      ..color = color
+      ..strokeWidth = width
+      ..strokeCap = StrokeCap.round);
+    canvas.drawCircle(centre, width * 0.9, Paint()..color = const Color(0xFF15191C));
+  }
+
+  @override
+  bool shouldRepaint(_DialPointerPainter old) => old.fraction != fraction || old.centre != centre || old.radius != radius;
+}
+
+/// Turns a dial by dragging up/down or scrolling. Reports the new fraction of the range (0..1) while turning, and
+/// once more when the turn ends.
+class _DialHandle extends StatefulWidget {
+  const _DialHandle({super.key, required this.fraction, required this.onTurn, required this.onDone, required this.tooltip, required this.label});
+
+  final double fraction;
+  final ValueChanged<double> onTurn;
+  final VoidCallback onDone;
+  final String tooltip;
+  final String label;
+
+  @override
+  State<_DialHandle> createState() => _DialHandleState();
+}
+
+class _DialHandleState extends State<_DialHandle> {
+  bool _active = false;
+  double _start = 0;
+  double _travel = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeUpDown,
+      onEnter: (_) => setState(() => _active = true),
+      onExit: (_) => setState(() => _active = false),
+      child: Listener(
+        onPointerSignal: (event) {
+          if (event is PointerScrollEvent) {
+            GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+              widget.onTurn((widget.fraction + (event.scrollDelta.dy < 0 ? 0.04 : -0.04)).clamp(0.0, 1.0));
+              widget.onDone();
+            });
+          }
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onPanStart: (_) {
+            _start = widget.fraction;
+            _travel = 0;
+          },
+          // A drag of 150 px turns the dial from one end to the other; up turns it up.
+          onPanUpdate: (details) {
+            _travel -= details.delta.dy;
+            widget.onTurn((_start + _travel / 150).clamp(0.0, 1.0));
+          },
+          onPanEnd: (_) => widget.onDone(),
+          child: Tooltip(
+            message: widget.tooltip,
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: _active
+                  ? Container(
+                      margin: const EdgeInsets.only(top: 2),
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(color: tokens.plate, borderRadius: BorderRadius.circular(Radii.plate)),
+                      child: Text(widget.label, style: plateText(12, tokens.onPlate, weight: 700)),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A thermal overload relay's working front: TEST, STOP and RESET can be pressed during simulation, and the current
+/// dial turns. The dial's pointer always shows the setting.
+class _TorPanelView extends StatelessWidget {
+  const _TorPanelView({super.key, required this.app, required this.device});
+
+  final AppState app;
+  final PlacedDevice device;
+
+  @override
+  Widget build(BuildContext context) {
+    final def = app.defOf(device);
+    final panel = def.torPanel!;
+    final dial = panel['dial'] as Map<String, dynamic>;
+    final origin = app.toScreen(Offset(device.x, device.y));
+    final size = Size(def.width * app.zoom, def.height * app.zoom);
+    Rect rectOf(Object? value) {
+      final r = (value as List<dynamic>).cast<num>();
+      return Rect.fromLTWH(r[0] * size.width, r[1] * size.height, r[2] * size.width, r[3] * size.height);
+    }
+
+    final min = (dial['min'] as num).toDouble(), max = (dial['max'] as num).toDouble();
+    final amps = app.number(device, 'rated_current_a');
+    final fraction = (amps - min) / (max - min);
+    final centre = Offset((dial['cx'] as num) * size.width, (dial['cy'] as num) * size.height);
+    final radius = (dial['r'] as num) * size.width;
+    Widget key(String name, String tip) => Positioned.fromRect(
+          rect: rectOf(panel[name]),
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: Tooltip(
+              message: tip,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onPanUpdate: (_) {},
+                child: Listener(
+                  key: ValueKey('tor-$name-${device.tag}'),
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: (_) {
+                    app.inspect(device);
+                    app.torKey(device, name, true);
+                  },
+                  onPointerUp: (_) => app.torKey(device, name, false),
+                  onPointerCancel: (_) => app.torKey(device, name, false),
+                ),
+              ),
+            ),
+          ),
+        );
+    return Positioned(
+      left: origin.dx,
+      top: origin.dy,
+      width: size.width,
+      height: size.height,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: _DialPointerPainter(centre, radius, fraction, const Color(0xFFF2F4F5),
+                    start: (dial['start'] as num?)?.toDouble() ?? 225, sweep: (dial['sweep'] as num?)?.toDouble() ?? 270),
+              ),
+            ),
+          ),
+          if (app.running) ...[
+            key('test', 'TEST: uji trip'),
+            key('stop', 'STOP: tahan untuk memutus 95-96'),
+            key('reset', 'RESET: kembalikan setelah trip'),
+            Positioned.fromRect(
+              rect: rectOf(dial['rect']),
+              child: _DialHandle(
+                key: ValueKey('tor-dial-${device.tag}'),
+                fraction: fraction,
+                tooltip: 'Arus setting ${amps.toStringAsFixed(1)} A. Seret naik/turun atau scroll.',
+                label: '${amps.toStringAsFixed(1)} A',
+                onTurn: (f) => app.setTorCurrent(device, min + f * (max - min)),
+                onDone: () {},
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// An analog timer's knob: its pointer shows the set time, and during simulation it turns by dragging or scrolling.
+class _KnobView extends StatelessWidget {
+  const _KnobView({super.key, required this.app, required this.device});
+
+  final AppState app;
+  final PlacedDevice device;
+
+  @override
+  Widget build(BuildContext context) {
+    final def = app.defOf(device);
+    final knob = def.knob!;
+    final origin = app.toScreen(Offset(device.x, device.y));
+    final size = Size(def.width * app.zoom, def.height * app.zoom);
+    final min = (knob['min'] as num).toDouble(), max = (knob['max'] as num).toDouble();
+    final log = knob['log'] == true;
+    final seconds = app.timeOf(device).clamp(min, max);
+    double fractionOf(double s) => log ? (math.log(s) - math.log(min)) / (math.log(max) - math.log(min)) : (s - min) / (max - min);
+    double secondsOf(double f) => log ? math.exp(math.log(min) + f * (math.log(max) - math.log(min))) : min + f * (max - min);
+    final centre = Offset((knob['cx'] as num) * size.width, (knob['cy'] as num) * size.height);
+    final radius = (knob['r'] as num) * size.width;
+    final text = seconds >= 60 ? '${(seconds / 60).toStringAsFixed(seconds % 60 == 0 ? 0 : 1)} mnt' : '${seconds.toStringAsFixed(seconds >= 10 ? 0 : 1)} dtk';
+    return Positioned(
+      left: origin.dx,
+      top: origin.dy,
+      width: size.width,
+      height: size.height,
+      child: Stack(
+        children: [
+          Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _DialPointerPainter(centre, radius, fractionOf(seconds), const Color(0xFFF2F4F5))))),
+          if (app.running)
+            Positioned.fromRect(
+              rect: Rect.fromCircle(center: centre, radius: radius),
+              child: _DialHandle(
+                key: ValueKey('timer-knob-${device.tag}'),
+                fraction: fractionOf(seconds),
+                tooltip: 'Waktu $text. Seret naik/turun atau scroll.',
+                label: text,
+                onTurn: (f) => app.turnTimerKnob(device, secondsOf(f)),
+                onDone: () => app.turnTimerKnob(device, app.timeOf(device), done: true),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The corner grip of the selected part: drag it to make the part bigger or smaller. The top-left corner stays put,
+/// terminals and wires follow, and one drag is one undo step.
+class _ResizeHandle extends StatefulWidget {
+  const _ResizeHandle({super.key, required this.app, required this.device});
+
+  final AppState app;
+  final PlacedDevice device;
+
+  @override
+  State<_ResizeHandle> createState() => _ResizeHandleState();
+}
+
+class _ResizeHandleState extends State<_ResizeHandle> {
+  double _startScale = 1;
+  Size _startSize = Size.zero;
+  Offset _drag = Offset.zero;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = widget.app;
+    final tokens = context.tokens;
+    final def = app.defOf(widget.device);
+    final corner = app.toScreen(Offset(widget.device.x + def.width, widget.device.y + def.height));
+    const size = 14.0;
+    return Positioned(
+      left: corner.dx - size / 2,
+      top: corner.dy - size / 2,
+      width: size,
+      height: size,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeDownRight,
+        child: Tooltip(
+          message: 'Seret untuk mengubah ukuran (${(app.scaleOf(widget.device) * 100).round()}%)',
+          child: GestureDetector(
+            key: const ValueKey('resize-handle'),
+            behavior: HitTestBehavior.opaque,
+            onPanStart: (_) {
+              _startScale = app.scaleOf(widget.device);
+              _startSize = Size(def.width * app.zoom, def.height * app.zoom);
+              _drag = Offset.zero;
+              app.beginControlEdit();
+            },
+            onPanUpdate: (details) {
+              _drag += details.delta;
+              // Grow by whichever way the corner moved further, relative to the part's size on screen.
+              final grow = math.max(_drag.dx / _startSize.width, _drag.dy / _startSize.height);
+              app.setDeviceScale(widget.device, _startScale * (1 + grow), keepTopLeft: true);
+            },
+            onPanEnd: (_) => app.endControlEdit(),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: tokens.panel,
+                border: Border.all(color: tokens.accent, width: 2),
+                borderRadius: BorderRadius.circular(Radii.plate),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _PhaseDots extends StatelessWidget {
   const _PhaseDots({required this.app, required this.device});
 
@@ -1756,6 +2084,32 @@ class WireCache {
   }
 }
 
+/// A wire's path with its bends rounded off, the way a real cable curves, each corner cut by at most [radius] and at
+/// most half of either run beside it.
+Path roundedWirePath(List<Offset> points, double radius) {
+  final path = Path()..moveTo(points.first.dx, points.first.dy);
+  for (var i = 1; i < points.length; i++) {
+    final p = points[i];
+    if (i == points.length - 1) {
+      path.lineTo(p.dx, p.dy);
+      break;
+    }
+    final before = points[i - 1], after = points[i + 1];
+    final inLength = (p - before).distance, outLength = (after - p).distance;
+    final r = math.min(radius, math.min(inLength, outLength) / 2);
+    if (r < 0.5 || inLength == 0 || outLength == 0) {
+      path.lineTo(p.dx, p.dy);
+      continue;
+    }
+    final start = p - (p - before) / inLength * r;
+    final end = p + (after - p) / outLength * r;
+    path
+      ..lineTo(start.dx, start.dy)
+      ..quadraticBezierTo(p.dx, p.dy, end.dx, end.dy);
+  }
+  return path;
+}
+
 class _WirePainter extends CustomPainter {
   const _WirePainter(this.app, this.tokens, this.pixelRatio);
 
@@ -1780,6 +2134,7 @@ class _WirePainter extends CustomPainter {
         app.project.wires[i].color,
         app.project.wires[i].isJumper,
         app.project.wires[i].number,
+        if (app.wireNumbersOn) app.wireLabel(app.project.wires[i]),
         if (app.running && result != null) result.at(app.project.wires[i].a),
         ...routes[i],
       ],
@@ -1808,7 +2163,17 @@ class _WirePainter extends CustomPainter {
       if (app.jumperMode) {
         _stroke(canvas, [start, pointer], tokens.accent, 3);
       } else {
-        _stroke(canvas, [start, Offset(start.dx, pointer.dy), pointer], tokens.accent, 2);
+        // Through the bends placed so far, then on to the pointer, turning vertically first like the finished wire.
+        final path = <Offset>[start];
+        for (final next in [...app.pendingCorners.map(app.toScreen), pointer]) {
+          final last = path.last;
+          if ((last.dx - next.dx).abs() > 0.5 && (last.dy - next.dy).abs() > 0.5) path.add(Offset(last.dx, next.dy));
+          path.add(next);
+        }
+        _stroke(canvas, path, tokens.accent, 2);
+        for (final corner in app.pendingCorners) {
+          canvas.drawCircle(app.toScreen(corner), 3.5, Paint()..color = tokens.accent);
+        }
       }
     }
   }
@@ -1828,7 +2193,7 @@ class _WirePainter extends CustomPainter {
       final selected = wire.id == app.selectedWire;
       var color = wire.color == Wire.defaultColor && app.dark ? tokens.textMuted : Color(wire.color);
       if (wire.color == 0xFF1F2428 && app.dark) color = const Color(0xFFB8BEC4);
-      var width = (wire.isJumper ? 5.0 : 4.0) * scale;
+      var width = (wire.isJumper ? 6.0 : 5.0) * scale;
       var live = false;
       if (app.running && result != null) {
         final label = result.at(wire.a);
@@ -1859,7 +2224,18 @@ class _WirePainter extends CustomPainter {
         _ferrule(canvas, points.first, points[1], scale, color);
         _ferrule(canvas, points.last, points[points.length - 2], scale, color);
       }
-      if (wire.number.isNotEmpty) _label(canvas, points, wire.number);
+    }
+    // Number markers last, so no wire runs over them. Hidden when zoomed out too far to read.
+    if (app.wireNumbersOn && app.zoom >= 0.45) {
+      for (var index = 0; index < app.project.wires.length; index++) {
+        final wire = app.project.wires[index];
+        if (wire.isJumper) continue;
+        final text = app.wireLabel(wire);
+        if (text.isEmpty) continue;
+        final points = routes[index];
+        _marker(canvas, points, text, scale);
+        _marker(canvas, points.reversed.toList(), text, scale);
+      }
     }
     // Junctions on top of the wires they join: a solder dot in the color of what flows through it.
     for (final device in app.project.devices) {
@@ -1890,32 +2266,39 @@ class _WirePainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _label(Canvas canvas, List<Offset> points, String text) {
-    var bestStart = points.first, bestEnd = points.last;
-    var best = -1.0;
-    for (var i = 0; i < points.length - 1; i++) {
-      final length = (points[i] - points[i + 1]).distance;
-      if (length > best) {
-        best = length;
-        bestStart = points[i];
-        bestEnd = points[i + 1];
+  /// A wire number marker near the start of [points]: a small printed sleeve on the wire, a little way past the
+  /// ferrule, turned to read upright.
+  void _marker(Canvas canvas, List<Offset> points, String text, double scale) {
+    if (points.length < 2) return;
+    // Near where the wire leaves the part: most of the way along the first run, clear of the part and its tag; on a
+    // short first run, a fixed distance along the wire.
+    final first = (points[1] - points[0]).distance;
+    final reach = first >= 28 * scale ? first * 0.82 : 34 * scale;
+    var travelled = 0.0;
+    Offset? at;
+    for (var i = 0; i + 1 < points.length; i++) {
+      final a = points[i], b = points[i + 1];
+      final length = (b - a).distance;
+      if (travelled + length >= reach) {
+        at = a + (b - a) * ((reach - travelled) / length);
+        break;
       }
+      travelled += length;
     }
-    final center = (bestStart + bestEnd) / 2;
+    if (at == null) return;
     final painter = TextPainter(
-      text: TextSpan(text: text, style: uiText((11 * app.zoom).clamp(9.0, 16.0), tokens.text, weight: 600)),
+      text: TextSpan(text: text, style: plateText((12 * app.zoom).clamp(8.0, 15.0), const Color(0xFF1F2428), weight: 700, height: 1)),
       textDirection: TextDirection.ltr,
     )..layout();
-    final origin = center - Offset(painter.width / 2, painter.height / 2);
-    canvas.drawRRect(RRect.fromRectAndRadius((origin & painter.size).inflate(2.5), const Radius.circular(3)), Paint()..color = tokens.canvas);
-    painter.paint(canvas, origin);
+    final box = Rect.fromCenter(center: at, width: math.max(painter.width + 6 * scale, 14 * scale), height: painter.height + 4 * scale);
+    final shape = RRect.fromRectAndRadius(box, Radius.circular(2 * scale));
+    canvas.drawRRect(shape.inflate(1), Paint()..color = const Color(0xFF23292E));
+    canvas.drawRRect(shape, Paint()..color = const Color(0xFFF1E6C4));
+    painter.paint(canvas, box.center - Offset(painter.width / 2, painter.height / 2));
   }
 
   void _stroke(Canvas canvas, List<Offset> points, Color color, double width) {
-    final path = Path()..moveTo(points.first.dx, points.first.dy);
-    for (final point in points.skip(1)) {
-      path.lineTo(point.dx, point.dy);
-    }
+    final path = roundedWirePath(points, 12 * app.zoom.clamp(0.55, 1.6));
     canvas.drawPath(
       path,
       Paint()

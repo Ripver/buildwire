@@ -451,11 +451,26 @@ Stress? _frequency(String? kind, double hertz, double volts) {
   return Stress(seconds, hertz < 45 ? DamageCause.lowFrequency : DamageCause.highFrequency, volts: volts, hertz: hertz);
 }
 
+/// The contactor-to-relay connections of overload relays plugged under a contactor: its 2/4/6 terminals carry
+/// straight on into the relay's 1/3/5 pins, with no wire drawn, as in a real starter.
+Iterable<(String, String)> seatedLinks(Project project) sync* {
+  for (final tor in project.devices) {
+    final contactor = (tor.data['seated_on'] as num?)?.toInt();
+    if (contactor == null) continue;
+    yield ('$contactor:2', '${tor.id}:1');
+    yield ('$contactor:4', '${tor.id}:3');
+    yield ('$contactor:6', '${tor.id}:5');
+  }
+}
+
 /// Adds load currents along paths back to the source.
 class _Flow {
   _Flow(this.project, this.defs, this.states, this.nets) {
     for (final wire in project.wires) {
       _link(wire.a.key, wire.b.key, null, null, wire);
+    }
+    for (final (a, b) in seatedLinks(project)) {
+      _link(a, b, null, null, null);
     }
     for (final device in project.devices) {
       final def = defs[device.defId]!;
@@ -606,6 +621,9 @@ class _Nets {
     final nets = _Nets._();
     for (final wire in project.wires) {
       nets._union(wire.a.key, wire.b.key);
+    }
+    for (final (a, b) in seatedLinks(project)) {
+      nets._union(a, b);
     }
     for (final device in project.devices) {
       final def = defs[device.defId]!;

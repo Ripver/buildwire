@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:buildwire/ai/ai_settings.dart';
 import 'package:buildwire/app_state.dart';
@@ -72,6 +73,33 @@ void main() {
         }
         expect(route.first, app.terminalWorld(wire.a), reason: 'ends stay on their terminals');
         expect(route.last, app.terminalWorld(wire.b));
+      }
+      app.dispose();
+    }
+  });
+
+  test('wires go around parts the short way instead of looping round the whole panel', () {
+    for (final template in kTemplates) {
+      final app = buildApp()..applyTemplate(template);
+      Rect rectOf(PlacedDevice d) => Rect.fromLTWH(d.x, d.y, app.defOf(d).width, app.defOf(d).height).deflate(2);
+      for (final wire in app.project.wires.where((w) => !w.isJumper)) {
+        // Other parts only: near its own terminals a wire may step around a neighbouring terminal inside the part.
+        final parts = [
+          for (final d in app.project.devices)
+            if (!app.defOf(d).isBackLayer && !app.defOf(d).isJunction && !wire.touches(d.id)) rectOf(d),
+        ];
+        final route = app.routeWorld(wire);
+        var length = 0.0;
+        for (var k = 0; k + 1 < route.length; k++) {
+          length += (route[k + 1] - route[k]).distance;
+          // Between the two terminal stubs, no run passes through a part.
+          if (k == 0 || k + 2 == route.length) continue;
+          final middle = (route[k] + route[k + 1]) / 2;
+          expect(parts.any((r) => r.contains(middle)), isFalse, reason: '${template.id}: wire ${wire.id} run $k crosses a part');
+        }
+        final direct = (route.first.dx - route.last.dx).abs() + (route.first.dy - route.last.dy).abs();
+        // 3.5x leaves room for a motor's middle lower terminal, boxed in by its neighbours, which still goes round.
+        expect(length, lessThan(math.max(direct, 40) * 3.5), reason: '${template.id}: wire ${wire.id} takes a long way round');
       }
       app.dispose();
     }
