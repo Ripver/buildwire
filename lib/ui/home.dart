@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../app_state.dart';
 import '../file_io.dart';
+import '../relay/relay_editor.dart';
 import '../templates.dart';
 import 'plc_editor.dart';
 import 'spark_wordmark.dart';
@@ -214,6 +215,12 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: () => showStandaloneLadder(context, app),
               icon: const Icon(Icons.view_week_outlined, size: 17),
               label: const Text(kLadderEditorName),
+            ),
+            OutlinedButton.icon(
+              key: const ValueKey('home-relay'),
+              onPressed: () => showBuildRelay(context),
+              icon: const Icon(Icons.electrical_services_outlined, size: 17),
+              label: const Text(kRelayEditorName),
             ),
           ],
         ),

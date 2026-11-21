@@ -87,3 +87,16 @@ Future<String?> saveLadderFile(String baseName, {Uint8List? zm2, required String
   await XFile.fromData(bytes, name: path.split(RegExp(r'[\/]')).last).saveTo(path);
   return asZm2 ? 'zm2' : 'bwlad';
 }
+
+const _relayTypes = [XTypeGroup(label: 'Diagram BuildRelay', extensions: ['bwrelay'])];
+
+/// A BuildRelay diagram the user picked: its name and text, or null if cancelled.
+Future<(String, String)?> pickRelayFile() async {
+  final file = await openFile(acceptedTypeGroups: _relayTypes);
+  if (file == null) return null;
+  if (await file.length() > _maxBytes) throw const FormatException('File terlalu besar (maksimal 16 MB).');
+  return (file.name, utf8.decode(await file.readAsBytes()));
+}
+
+Future<bool> saveRelayFile(String name, String text) =>
+    saveBytes(baseName: name, extension: 'bwrelay', label: 'Diagram BuildRelay', mimeType: 'application/json', bytes: Uint8List.fromList(utf8.encode(text)));

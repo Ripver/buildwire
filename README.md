@@ -40,6 +40,14 @@ It was made for vocational students and the teachers who train them, so the inte
 - Simulates on its own with clickable inputs, or runs inside a PLC on the canvas.
 - Opens and saves Zelio Soft 2 `.zm2` files, so a program written here loads in Zelio Soft and the other way round.
 
+**BuildRelay, a relay control schematic editor**
+- Draw classic relay control on a blank sheet with IEC symbols, the control and the power circuit together. There are no ready-made circuits; every diagram starts empty.
+- Supplies (single phases, three-phase with or without N, DC, a 24 V DC power supply, a control transformer), push buttons, emergency stops, selectors including 1-0-2, limit switches, contactor and relay coils, impulse relays, on-delay, off-delay and flasher timers, NO, NC and changeover contacts, fuses, MCBs, MPCBs, RCDs, isolators, overload relays, lamps, buzzers, bells, sirens, heaters, solenoid valves, and single-phase, three-phase, star-delta, Dahlander and DC motors.
+- Wires go point to point: click a terminal, click to bend, click the target terminal, or click the middle of a wire to branch from it.
+- Contacts follow the coil, timer or overload relay with the same tag (KM1, KT1, F1).
+- Press Simulasi and operate the sheet: buttons act while held, selectors and emergency stops stay where they are put, breakers switch off and trip. Live wires take the colour of their phase, coils and lamps light, motors turn and show forward or reverse, star or delta. A short trips the breaker feeding it, and an earth fault trips the RCD.
+- Diagrams save as `.bwrelay` files.
+
 **AI assistant (optional)**
 - Works with your own API key on any Anthropic-compatible or OpenAI-compatible endpoint (Claude, GPT, DeepSeek and others). The key stays on your computer, encrypted with Windows DPAPI.
 - It places parts, draws the wires and writes ladder programs, then runs the simulator to check the result before it reports back.
@@ -97,6 +105,7 @@ which writes `dist\buildwire-setup.exe`.
 | `lib/sim/ladder.dart` | Ladder program model and scan: coils, timers, counters, clock blocks |
 | `lib/sim/zm2.dart` | Reading and writing Zelio Soft 2 `.zm2` files |
 | `lib/ui/` | Canvas, panels, BuildLadder, home screen, theme |
+| `lib/relay/` | BuildRelay: symbols, simulation and editor |
 | `lib/ai/` | The assistant: endpoint detection, agent loop, canvas and ladder tools, attachments |
 | `assets/devices/` | Part pictures and `index.json`, the part catalogue |
 | `assets/symbols/` | Schematic symbols converted to SVG |

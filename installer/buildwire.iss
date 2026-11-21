@@ -10,7 +10,7 @@
 ; so nothing else needs to be installed on the target PC.
 
 #define AppName "BuildWire"
-#define AppVersion "1.2.0"
+#define AppVersion "1.3.0"
 #define AppExe "BuildWire.exe"
 #define Release "..\build\windows\x64\runner\Release"
 

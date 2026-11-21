@@ -546,7 +546,7 @@ class _Toolbar extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Versi 1.2', style: uiText(13, tokens.textMuted)),
+              Text('Versi 1.3', style: uiText(13, tokens.textMuted)),
               const SizedBox(height: 14),
               Text(
                 'Simulator menghitung tegangan, arus, dan daya pada kondisi tunak dengan beban impedansi tetap. Jatuh tegangan, '
